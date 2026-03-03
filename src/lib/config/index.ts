@@ -181,6 +181,11 @@ class ConfigManager {
     const newProviders: ConfigModelProvider[] = [];
 
     providerConfigSections.forEach((provider) => {
+      // Skip providers with no configurable fields — they have nothing to
+      // auto-initialize from env vars and would be added unconditionally
+      // on every restart (e.g. Transformers).
+      if (provider.fields.length === 0) return;
+
       const newProvider: ConfigModelProvider & { required?: string[] } = {
         id: crypto.randomUUID(),
         name: `${provider.name}`,
