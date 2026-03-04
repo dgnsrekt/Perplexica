@@ -3,6 +3,84 @@ import { ResearchAction } from '../../types';
 import { Chunk, ReadingResearchBlock } from '@/lib/types';
 import TurnDown from 'turndown';
 import path from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import fs from 'fs';
+import os from 'os';
+
+const execFileAsync = promisify(execFile);
+const YTDLP = '/usr/local/searxng/searx-pyenv/bin/yt-dlp';
+
+function isYouTubeUrl(url: string): boolean {
+  return /(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)/.test(url);
+}
+
+function parseVTT(vtt: string): string {
+  const seen = new Set<string>();
+  return vtt
+    .split('\n')
+    .filter((line) => {
+      const t = line.trim();
+      if (!t) return false;
+      if (t === 'WEBVTT') return false;
+      if (/^Kind:|^Language:|^\d{2}:\d{2}:\d{2}/.test(t)) return false;
+      if (seen.has(t)) return false;
+      seen.add(t);
+      return true;
+    })
+    .join(' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/<[^>]+>/g, '');
+}
+
+async function fetchYouTubeTranscript(
+  url: string,
+): Promise<{ title: string; text: string }> {
+  const { stdout: titleOut } = await execFileAsync(YTDLP, [
+    '--print',
+    'title',
+    '--no-playlist',
+    '--quiet',
+    url,
+  ]);
+  const title = titleOut.trim() || 'YouTube Video';
+
+  const tmpBase = `${os.tmpdir()}/yt_${crypto.randomUUID()}`;
+  try {
+    await execFileAsync(YTDLP, [
+      '--write-auto-subs',
+      '--write-subs',
+      '--sub-langs',
+      'en',
+      '--skip-download',
+      '--sub-format',
+      'vtt',
+      '--no-playlist',
+      '--quiet',
+      '-o',
+      tmpBase,
+      url,
+    ]);
+
+    const vttPath = `${tmpBase}.en.vtt`;
+    const vtt = fs.readFileSync(vttPath, 'utf-8');
+    fs.unlinkSync(vttPath);
+
+    const text = parseVTT(vtt);
+    if (!text.trim()) throw new Error('empty transcript');
+
+    return { title, text };
+  } catch {
+    // clean up any leftover tmp files
+    try {
+      fs
+        .readdirSync(os.tmpdir())
+        .filter((f) => f.startsWith(`yt_${tmpBase.split('yt_')[1]}`))
+        .forEach((f) => fs.unlinkSync(`${os.tmpdir()}/${f}`));
+    } catch {}
+    throw new Error('transcript unavailable');
+  }
+}
 
 const turndownService = new TurnDown();
 
@@ -39,6 +117,66 @@ const scrapeURLAction: ResearchAction<typeof schema> = {
     await Promise.all(
       params.urls.map(async (url) => {
         try {
+          if (isYouTubeUrl(url)) {
+            try {
+              const { title, text: transcriptText } =
+                await fetchYouTubeTranscript(url);
+
+              if (
+                !readingEmitted &&
+                researchBlock &&
+                researchBlock.type === 'research'
+              ) {
+                readingEmitted = true;
+                researchBlock.data.subSteps.push({
+                  id: readingBlockId,
+                  type: 'reading',
+                  reading: [{ content: '', metadata: { url, title } }],
+                });
+                additionalConfig.session.updateBlock(
+                  additionalConfig.researchBlockId,
+                  [
+                    {
+                      op: 'replace',
+                      path: '/data/subSteps',
+                      value: researchBlock.data.subSteps,
+                    },
+                  ],
+                );
+              } else if (
+                readingEmitted &&
+                researchBlock &&
+                researchBlock.type === 'research'
+              ) {
+                const subStepIndex = researchBlock.data.subSteps.findIndex(
+                  (step: any) => step.id === readingBlockId,
+                );
+                const subStep = researchBlock.data.subSteps[
+                  subStepIndex
+                ] as ReadingResearchBlock;
+                subStep.reading.push({ content: '', metadata: { url, title } });
+                additionalConfig.session.updateBlock(
+                  additionalConfig.researchBlockId,
+                  [
+                    {
+                      op: 'replace',
+                      path: '/data/subSteps',
+                      value: researchBlock.data.subSteps,
+                    },
+                  ],
+                );
+              }
+
+              results.push({
+                content: `[YouTube Transcript]\n\n${transcriptText}`,
+                metadata: { url, title },
+              });
+              return;
+            } catch {
+              // no transcript available — fall through to HTML scrape
+            }
+          }
+
           const res = await fetch(url);
           const text = await res.text();
 

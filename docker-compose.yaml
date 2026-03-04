@@ -12,6 +12,7 @@ services:
     volumes:
       - ./.next:/home/perplexica/.next:ro
       - data:/home/perplexica/data
+    entrypoint: ["/bin/sh", "-c", "/usr/local/searxng/searx-pyenv/bin/pip install yt-dlp --quiet && exec /home/perplexica/entrypoint.sh"]
     restart: unless-stopped
 
 volumes:
